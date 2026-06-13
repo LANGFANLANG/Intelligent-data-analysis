@@ -1,0 +1,27 @@
+[project]
+name = "data-analysis-agent"
+version = "0.1.0"
+description = "基于 DeepSeek + LangChain 的智能数据分析助手"
+requires-python = ">=3.11"
+dependencies = [
+    "langchain",
+    "langchain-community",
+    "langchain-openai",
+    "matplotlib",
+    "numpy",
+    "openpyxl",
+    "pandas",
+    "plotly",
+    "psycopg2-binary>=2.9.12",
+    "python-dotenv",
+    "seaborn",
+    "sqlalchemy>=2.0.50",
+    "streamlit",
+]
+
+[project.scripts]
+data-agent = "run:run_streamlit"
+data-agent-cli = "run:run_cli"
+
+[tool.uv]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"

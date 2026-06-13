@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: data_agent_pg
+    environment:
+      POSTGRES_USER: data_agent
+      POSTGRES_PASSWORD: data_agent_pass
+      POSTGRES_DB: data_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:
