@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from src.agent.context import ToolContext
 from src.agent.tools import ALL_TOOLS
 from src.llm.deepseek_client import get_llm
-from src.config import DEEPSEEK_MODEL
+from src.config import DEEPSEEK_MODEL, AGENT_MAX_STEPS, AGENT_TIMEOUT_SECONDS
 from src.tracing import trace_span, TraceContext
 
 # ── Agent 系统提示词 ──
@@ -103,16 +103,16 @@ def run_agent(prompt: str, history: list[dict] | None = None, temperature: float
     # 创建并执行 Agent
     agent = _create_agent(temperature=temperature, streaming=False)
 
-    # 兜底机制：限制最多40步(思考+行动)，120秒超时
-    # 复杂分析任务（多图表+多查询）可能需要更多步骤
-    config = {"recursion_limit": 40}
+    # 兜底机制：限制步骤 + 超时
+    # 可通过 AGENT_MAX_STEPS / AGENT_TIMEOUT_SECONDS 环境变量调整
+    config = {"recursion_limit": AGENT_MAX_STEPS}
     try:
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(agent.invoke, {"messages": messages}, config)
-            result = future.result(timeout=120)
+            result = future.result(timeout=AGENT_TIMEOUT_SECONDS)
     except FuturesTimeoutError:
         return {
-            "text": "分析超时(120秒)，请尝试简化问题或检查数据质量。",
+            "text": f"分析超时({AGENT_TIMEOUT_SECONDS}秒)，请尝试简化问题或检查数据质量。",
             "images": [],
         }
     except Exception as e:
@@ -120,7 +120,7 @@ def run_agent(prompt: str, history: list[dict] | None = None, temperature: float
         # recursion_limit 耗尽时 Agent 会抛特定异常
         if "recursion" in error_str.lower() or "limit" in error_str.lower():
             return {
-                "text": "分析步骤过多(超过40步)，建议将问题拆分为多个小问题依次提问。",
+                "text": f"分析步骤过多(超过{AGENT_MAX_STEPS}步)，建议将问题拆分为多个小问题依次提问。",
                 "images": [],
             }
         raise  # 其他异常继续向上抛出，由 UI 层兜底
@@ -203,7 +203,7 @@ def run_agent_stream(prompt: str, history: list[dict] | None = None, temperature
 
     # 创建流式 Agent
     agent = _create_agent(temperature=temperature, streaming=True)
-    config = {"recursion_limit": 40}
+    config = {"recursion_limit": AGENT_MAX_STEPS}
 
     full_text = ""
     images = []
@@ -293,7 +293,7 @@ def run_agent_stream(prompt: str, history: list[dict] | None = None, temperature
         except Exception as e:
             error_str = str(e)
             if "recursion" in error_str.lower() or "limit" in error_str.lower():
-                yield {"type": "error", "content": "分析步骤过多(超过40步)，建议将问题拆分为多个小问题依次提问。"}
+                yield {"type": "error", "content": f"分析步骤过多(超过{AGENT_MAX_STEPS}步)，建议将问题拆分为多个小问题依次提问。"}
             else:
                 yield {"type": "error", "content": f"分析异常: {error_str}"}
             return

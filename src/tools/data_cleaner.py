@@ -15,6 +15,7 @@
 """
 import pandas as pd
 from src.agent.context import ToolContext
+from src.tools.analyzer import _maybe_sample, SAMPLE_MAX_ROWS
 
 
 def check_missing() -> str:
@@ -63,8 +64,13 @@ def fill_missing_mean(column: str) -> str:
         return f"错误: 列 '{column}' 不是数值类型，无法用均值填充"
 
     before = df[column].isnull().sum()
-    df[column].fillna(df[column].mean(), inplace=True)
-    return f"已用均值填充列 '{column}' 的 {before} 个缺失值"
+    sample_data, was_sampled = _maybe_sample(df[column].dropna())
+    fill_val = sample_data.mean()
+    df[column].fillna(fill_val, inplace=True)
+    msg = f"已用均值 {fill_val:.4f} 填充列 '{column}' 的 {before} 个缺失值"
+    if was_sampled:
+        msg += f" (基于 {SAMPLE_MAX_ROWS} 条采样数据估算)"
+    return msg
 
 
 def fill_missing_median(column: str) -> str:
@@ -87,8 +93,13 @@ def fill_missing_median(column: str) -> str:
         return f"错误: 列 '{column}' 不是数值类型，无法用中位数填充"
 
     before = df[column].isnull().sum()
-    df[column].fillna(df[column].median(), inplace=True)
-    return f"已用中位数填充列 '{column}' 的 {before} 个缺失值"
+    sample_data, was_sampled = _maybe_sample(df[column].dropna())
+    fill_val = sample_data.median()
+    df[column].fillna(fill_val, inplace=True)
+    msg = f"已用中位数 {fill_val:.4f} 填充列 '{column}' 的 {before} 个缺失值"
+    if was_sampled:
+        msg += f" (基于 {SAMPLE_MAX_ROWS} 条采样数据估算)"
+    return msg
 
 
 def fill_missing_mode(column: str) -> str:
@@ -108,10 +119,14 @@ def fill_missing_mode(column: str) -> str:
         return f"错误: 列 '{column}' 不存在"
 
     before = df[column].isnull().sum()
-    mode_val = df[column].mode()
+    sample_data, was_sampled = _maybe_sample(df[column].dropna())
+    mode_val = sample_data.mode()
     if len(mode_val) > 0:
         df[column].fillna(mode_val[0], inplace=True)
-        return f"已用众数 '{mode_val[0]}' 填充列 '{column}' 的 {before} 个缺失值"
+        msg = f"已用众数 '{mode_val[0]}' 填充列 '{column}' 的 {before} 个缺失值"
+        if was_sampled:
+            msg += f" (基于 {SAMPLE_MAX_ROWS} 条采样数据估算)"
+        return msg
     return f"列 '{column}' 没有众数，填充失败"
 
 

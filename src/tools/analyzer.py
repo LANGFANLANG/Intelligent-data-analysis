@@ -9,9 +9,30 @@
   correlate()         - 计算数值列之间的相关系数矩阵
   groupby_agg()       - 分组聚合 (sum/mean/count/min/max/std)
   value_counts()      - 单列频率统计 (Top N)
+
+大数据保护:
+  当 DataFrame 行数超过 SAMPLE_MAX_ROWS 时自动采样，
+  避免超大计算导致 OOM。采样结果会标注 "(已采样，基于 N 条记录)"。
 """
+import os
 import pandas as pd
 from src.agent.context import ToolContext
+from src.config import SAMPLE_MAX_ROWS
+
+
+def _maybe_sample(df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
+    """
+    超过阈值时自动降采样
+
+    Args:
+        df: 原始 DataFrame
+
+    Returns:
+        (处理后的 DataFrame, 是否已采样)
+    """
+    if len(df) > SAMPLE_MAX_ROWS:
+        return df.sample(n=SAMPLE_MAX_ROWS, random_state=42), True
+    return df, False
 
 
 def describe_data(columns: str = "") -> str:
@@ -42,8 +63,12 @@ def describe_data(columns: str = "") -> str:
             target = df
 
     # 生成描述性统计
+    target, sampled = _maybe_sample(target)
     desc = target.describe()
-    return desc.to_string()
+    result = desc.to_string()
+    if sampled:
+        result += f"\n\n(已采样，基于 {SAMPLE_MAX_ROWS} 条记录计算)"
+    return result
 
 
 def correlate(columns: str = "") -> str:
@@ -78,8 +103,12 @@ def correlate(columns: str = "") -> str:
     if target.shape[1] < 2:
         return "错误: 至少需要2个数值列才能计算相关性"
 
+    target, sampled = _maybe_sample(target)
     corr_matrix = target.corr()
-    return corr_matrix.to_string()
+    result = corr_matrix.to_string()
+    if sampled:
+        result += f"\n\n(已采样，基于 {SAMPLE_MAX_ROWS} 条记录计算)"
+    return result
 
 
 def groupby_agg(group_col: str, value_col: str, agg_func: str = "mean") -> str:
@@ -107,8 +136,12 @@ def groupby_agg(group_col: str, value_col: str, agg_func: str = "mean") -> str:
     if agg_func not in valid_funcs:
         return f"错误: 不支持的聚合函数 '{agg_func}'，支持: {', '.join(valid_funcs)}"
 
+    df, sampled = _maybe_sample(df)
     result = df.groupby(group_col)[value_col].agg(agg_func)
-    return result.to_string()
+    out = result.to_string()
+    if sampled:
+        out += f"\n\n(已采样，基于 {SAMPLE_MAX_ROWS} 条记录计算)"
+    return out
 
 
 def value_counts(column: str, top_n: int = 10) -> str:
@@ -129,5 +162,9 @@ def value_counts(column: str, top_n: int = 10) -> str:
     if column not in df.columns:
         return f"错误: 列 '{column}' 不存在"
 
+    df, sampled = _maybe_sample(df)
     counts = df[column].value_counts().head(top_n)
-    return counts.to_string()
+    result = counts.to_string()
+    if sampled:
+        result += f"\n\n(已采样，基于 {SAMPLE_MAX_ROWS} 条记录计算)"
+    return result

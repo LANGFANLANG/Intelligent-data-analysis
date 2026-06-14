@@ -66,11 +66,12 @@ def run_streamlit():
     默认监听 8501 端口。
     """
     import streamlit.web.cli as st_cli
+    from src.config import STREAMLIT_PORT
 
     # 拼接 streamlit_app.py 的绝对路径
     app_path = os.path.join(os.path.dirname(__file__), "src", "ui", "streamlit_app.py")
     # 构造 streamlit CLI 参数
-    sys.argv = ["streamlit", "run", app_path, "--server.port", "8501"]
+    sys.argv = ["streamlit", "run", app_path, "--server.port", str(STREAMLIT_PORT)]
     st_cli.main()
 
 

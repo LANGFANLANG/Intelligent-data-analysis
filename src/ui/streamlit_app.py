@@ -34,6 +34,7 @@ from src.agent.router import route_stream
 from src.tools.data_loader import load_file
 from src.database.session_manager import SessionManager
 from src.tracing import TraceContext, trace_span, TraceManager
+from src.agent.sanitizer import sanitize
 
 # ── 页面配置 ──────────────────────────────────────────────────
 st.set_page_config(
@@ -385,6 +386,13 @@ else:
     placeholder = "请先在左侧上传数据文件..."
 
 if prompt := st.chat_input(placeholder=placeholder):
+    # Prompt 注入防护
+    try:
+        prompt = sanitize(prompt)
+    except ValueError as e:
+        st.error(str(e))
+        st.stop()
+
     TraceContext.init()  # 开启新链路
 
     # 0. 首次提问时用问题内容自动命名会话，时间标记为首次交互时间

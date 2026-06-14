@@ -15,6 +15,7 @@
 from src.agent.context import ToolContext
 from src.agent.agent import run_agent_stream, run_chat_stream
 from src.llm.deepseek_client import get_llm
+from src.llm.rate_limiter import rate_limiter
 from src.config import DEEPSEEK_MODEL
 from src.tracing import trace_span, TraceContext
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -82,6 +83,10 @@ def route_stream(prompt: str, history: list[dict] | None = None, temperature: fl
           {"type": "error",      "content": "..."}
           {"type": "done",       "full_text": "...", "images": [...]}
     """
+    if not rate_limiter.acquire():
+        yield {"type": "error", "content": "请求过于频繁，请稍后重试（每分钟限制 30 次）"}
+        return
+
     with trace_span("route"):
         intent = classify_intent(prompt)
         has_data = ToolContext.has_data()

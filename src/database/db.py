@@ -6,16 +6,13 @@
 """
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from src.config import DATABASE_URL
+from src.config import DATABASE_URL, DB_POOL_SIZE, DB_POOL_RECYCLE
 
 # ── 数据库引擎 ──
-# pool_size:      连接池大小（5个并发连接）
-# pool_recycle:   连接回收时间（1小时），防止长连接断开
-# pool_pre_ping:  使用前先 ping 测试连接有效性，避免使用已断开的连接
 engine = create_engine(
     DATABASE_URL,
-    pool_size=5,
-    pool_recycle=3600,
+    pool_size=DB_POOL_SIZE,
+    pool_recycle=DB_POOL_RECYCLE,
     pool_pre_ping=True,
 )
 
@@ -47,12 +44,14 @@ def drop_all():
 
 if __name__ == "__main__":
     import sys
+    from src.logger import get_logger
+    _log = get_logger("db")
 
     if "--drop" in sys.argv:
         confirm = input("确认删除所有表? 输入 yes 继续: ")
         if confirm.lower() == "yes":
             drop_all()
-            print("所有表已删除")
+            _log.info("所有表已删除")
     else:
         init_db()
-        print("数据库表初始化完成（已存在的表自动跳过）")
+        _log.info("数据库表初始化完成（已存在的表自动跳过）")

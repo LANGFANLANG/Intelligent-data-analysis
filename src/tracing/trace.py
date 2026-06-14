@@ -155,9 +155,8 @@ class TraceManager:
             db.commit()
         except Exception as e:
             db.rollback()
-            import traceback
-            print(f"[TraceManager] 保存链路失败: {e}")
-            traceback.print_exc()
+            from src.logger import get_logger
+            get_logger("trace").error("保存链路失败: %s", e, exc_info=True)
         finally:
             db.close()
 

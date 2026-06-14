@@ -20,6 +20,24 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"
 
 # ── PostgreSQL 数据库配置 ──
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://data_agent:data_agent_pass@localhost:5432/data_agent")
+DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
+DB_POOL_RECYCLE = int(os.getenv("DB_POOL_RECYCLE", "3600"))
+
+# ── Agent 运行参数 ──
+AGENT_MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "40"))
+AGENT_TIMEOUT_SECONDS = int(os.getenv("AGENT_TIMEOUT_SECONDS", "120"))
+
+# ── 可视化参数 ──
+VIZ_MAX_PIE_CATEGORIES = int(os.getenv("VIZ_MAX_PIE_CATEGORIES", "8"))
+VIZ_MAX_BAR_CATEGORIES = int(os.getenv("VIZ_MAX_BAR_CATEGORIES", "30"))
+VIZ_DPI = int(os.getenv("VIZ_DPI", "200"))
+
+# ── 数据加载参数 ──
+MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "100"))
+SAMPLE_MAX_ROWS = int(os.getenv("SAMPLE_MAX_ROWS", "50000"))
+
+# ── Streamlit 端口 ──
+STREAMLIT_PORT = int(os.getenv("STREAMLIT_PORT", "8501"))
 
 # ── 启动校验 ──
 if not DEEPSEEK_API_KEY:
@@ -29,3 +47,17 @@ if not DEEPSEEK_API_KEY:
         "  2. 设置系统环境变量 DEEPSEEK 或 DEEPSEEK_API_KEY\n"
         "可参考 .env.example 文件格式"
     )
+
+# ── API Key 安全提醒 ──
+if env_path.exists() and os.getenv("DEEPSEEK_API_KEY"):
+    from src.logger import get_logger
+    _log = get_logger("config")
+    import stat as _stat
+    try:
+        mode = env_path.stat().st_mode
+        if mode & _stat.S_IROTH or mode & _stat.S_IWOTH:
+            _log.warning(".env 文件权限过宽，建议执行 chmod 600 .env")
+    except Exception:
+        pass
+    _log.warning("API Key 存储在 .env 文件中，确保不要提交到 Git 仓库")
+    _log.warning("建议: 定期到 DeepSeek 后台轮换 API Key (https://platform.deepseek.com/api_keys)")

@@ -30,6 +30,8 @@ def get_llm(temperature: float = 0.1, streaming: bool = True):
         base_url=DEEPSEEK_BASE_URL,
         temperature=temperature,
         streaming=streaming,
+        max_retries=3,
+        request_timeout=60,
     )
 
 
