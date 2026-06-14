@@ -21,6 +21,8 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from src.agent.context import ToolContext
 from src.agent.tools import ALL_TOOLS
 from src.llm.deepseek_client import get_llm
+from src.config import DEEPSEEK_MODEL
+from src.tracing import trace_span, TraceContext
 
 # ── Agent 系统提示词 ──
 AGENT_SYSTEM_PROMPT = """你是一个专业的数据分析 Agent。用户已上传数据文件，你需要通过调用工具来完成分析任务。
@@ -206,79 +208,119 @@ def run_agent_stream(prompt: str, history: list[dict] | None = None, temperature
     full_text = ""
     images = []
     tool_calls_seen = set()
+    llm_call_index = 0
 
-    try:
-        for msg, _meta in agent.stream(
-            {"messages": messages}, config, stream_mode="messages"
-        ):
-            if isinstance(msg, AIMessageChunk):
-                # 工具调用检测：从 tool_calls 增量中提取新工具名
-                if msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        name = tc.get("name")
-                        if name and name not in tool_calls_seen:
-                            tool_calls_seen.add(name)
-                            yield {"type": "tool_start", "tool": name}
+    with trace_span("run_agent_stream"):
+        TraceContext.add_meta(model=DEEPSEEK_MODEL)
+        try:
+            for msg, _meta in agent.stream(
+                {"messages": messages}, config, stream_mode="messages"
+            ):
+                if isinstance(msg, AIMessageChunk):
+                    # 工具调用检测：从 tool_calls 增量中提取新工具名
+                    if msg.tool_calls:
+                        new_tools = []
+                        for tc in msg.tool_calls:
+                            name = tc.get("name")
+                            if name and name not in tool_calls_seen:
+                                tool_calls_seen.add(name)
+                                new_tools.append(name)
+                        if new_tools:
+                            llm_call_index += 1
+                            TraceContext.add_meta(
+                                **{f"llm_call_{llm_call_index}_tools": new_tools}
+                            )
+                            for t in new_tools:
+                                yield {"type": "tool_start", "tool": t}
 
-                # 文本 token 输出
-                if msg.content and isinstance(msg.content, str):
-                    full_text += msg.content
-                    yield {"type": "token", "content": msg.content}
+                    # 文本 token 输出
+                    if msg.content and isinstance(msg.content, str):
+                        full_text += msg.content
+                        TraceContext.add_token()
+                        yield {"type": "token", "content": msg.content}
 
-            elif isinstance(msg, ToolMessage):
-                content = str(msg.content) if msg.content else ""
-                tool_imgs = []
+                elif isinstance(msg, ToolMessage):
+                    tool_name = getattr(msg, "name", "unknown")
+                    content = str(msg.content) if msg.content else ""
+                    tool_imgs = []
 
-                # 从工具输出中提取 .png 图片路径
-                if ".png" in content:
-                    for line in content.split("\n"):
-                        line = line.strip()
-                        if line.endswith(".png") and (
-                            "outputs" in line or "/" in line or "\\" in line
-                        ):
-                            tool_imgs.append(line)
+                    with trace_span(tool_name):
+                        # 记录工具执行状态
+                        if content.startswith("错误"):
+                            TraceContext.add_meta(
+                                result_status="error",
+                                error_msg=content[:200],
+                            )
+                        elif ".png" in content:
+                            # 工具返回了图片路径
+                            png_count = content.count(".png")
+                            TraceContext.add_meta(
+                                result_status="success",
+                                has_image=True,
+                                image_count=png_count,
+                            )
+                        else:
+                            TraceContext.add_meta(
+                                result_status="success",
+                                result_len=len(content),
+                            )
 
-                images.extend(tool_imgs)
-                yield {
-                    "type": "tool_end",
-                    "tool": getattr(msg, "name", "unknown"),
-                    "content": content,
-                    "images": tool_imgs,
-                }
+                        # 从工具输出中提取 .png 图片路径
+                        if ".png" in content:
+                            for line in content.split("\n"):
+                                line = line.strip()
+                                if line.endswith(".png") and (
+                                    "outputs" in line or "/" in line or "\\" in line
+                                ):
+                                    tool_imgs.append(line)
 
-            elif isinstance(msg, AIMessage):
-                # 兜底：如果 LLM 以非流式返回完整消息，取内容
-                if not full_text and msg.content:
-                    content = str(msg.content)
-                    full_text = content
-                    yield {"type": "token", "content": content}
+                        images.extend(tool_imgs)
+                        yield {
+                            "type": "tool_end",
+                            "tool": tool_name,
+                            "content": content,
+                            "images": tool_imgs,
+                        }
 
-    except Exception as e:
-        error_str = str(e)
-        if "recursion" in error_str.lower() or "limit" in error_str.lower():
-            yield {"type": "error", "content": "分析步骤过多(超过40步)，建议将问题拆分为多个小问题依次提问。"}
-        else:
-            yield {"type": "error", "content": f"分析异常: {error_str}"}
-        return
+                elif isinstance(msg, AIMessage):
+                    # 兜底：如果 LLM 以非流式返回完整消息，取内容
+                    if not full_text and msg.content:
+                        content = str(msg.content)
+                        full_text = content
+                        TraceContext.add_token()
+                        yield {"type": "token", "content": content}
 
-    # 检测 LLM 是否提示步骤不足
-    need_more_hints = {
-        "need more steps", "need more tool", "need additional step",
-        "need more information", "more steps to process",
-        "unable to complete", "cannot complete",
-        "需要更多步骤", "步骤不足", "无法完成",
-    }
-    final_lower = full_text.lower()
-    if any(hint in final_lower for hint in need_more_hints):
-        full_text += (
-            "\n\n> 分析未完全结束，建议将问题拆分为更小的子问题依次提问，"
-            "或直接指明具体需要什么样的分析。"
+        except Exception as e:
+            error_str = str(e)
+            if "recursion" in error_str.lower() or "limit" in error_str.lower():
+                yield {"type": "error", "content": "分析步骤过多(超过40步)，建议将问题拆分为多个小问题依次提问。"}
+            else:
+                yield {"type": "error", "content": f"分析异常: {error_str}"}
+            return
+
+        # 检测 LLM 是否提示步骤不足
+        need_more_hints = {
+            "need more steps", "need more tool", "need additional step",
+            "need more information", "more steps to process",
+            "unable to complete", "cannot complete",
+            "需要更多步骤", "步骤不足", "无法完成",
+        }
+        final_lower = full_text.lower()
+        if any(hint in final_lower for hint in need_more_hints):
+            full_text += (
+                "\n\n> 分析未完全结束，建议将问题拆分为更小的子问题依次提问，"
+                "或直接指明具体需要什么样的分析。"
+            )
+
+        # 去重图片路径
+        images = list(dict.fromkeys(images))
+
+        TraceContext.add_meta(
+            total_tokens=TraceContext.get_token_count(),
+            llm_calls=llm_call_index,
         )
 
-    # 去重图片路径
-    images = list(dict.fromkeys(images))
-
-    yield {"type": "done", "full_text": full_text, "images": images}
+        yield {"type": "done", "full_text": full_text, "images": images}
 
 
 CHAT_SYSTEM_PROMPT = """你是一个友好的 AI 助手 DataMate，擅长数据分析相关的技术问答和日常对话。
@@ -325,13 +367,17 @@ def run_chat_stream(prompt: str, history: list[dict] | None = None, temperature:
     llm = get_llm(temperature=temperature, streaming=True)
     full_text = ""
 
-    try:
-        for chunk in llm.stream(messages):
-            if chunk.content:
-                full_text += chunk.content
-                yield {"type": "token", "content": chunk.content}
-    except Exception as e:
-        yield {"type": "error", "content": f"对话异常: {e}"}
-        return
+    with trace_span("chat_llm_call"):
+        TraceContext.add_meta(model=DEEPSEEK_MODEL)
+        try:
+            for chunk in llm.stream(messages):
+                if chunk.content:
+                    full_text += chunk.content
+                    TraceContext.add_token()
+                    yield {"type": "token", "content": chunk.content}
+        except Exception as e:
+            yield {"type": "error", "content": f"对话异常: {e}"}
+            return
 
-    yield {"type": "done", "full_text": full_text, "images": []}
+        TraceContext.add_meta(total_tokens=TraceContext.get_token_count())
+        yield {"type": "done", "full_text": full_text, "images": []}

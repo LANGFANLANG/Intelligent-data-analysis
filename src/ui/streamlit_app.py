@@ -32,8 +32,8 @@ from src.agent.context import ToolContext
 from src.agent.agent import run_agent, run_agent_stream
 from src.agent.router import route_stream
 from src.tools.data_loader import load_file
-from src.database.db import init_db
 from src.database.session_manager import SessionManager
+from src.tracing import TraceContext, trace_span, TraceManager
 
 # ── 页面配置 ──────────────────────────────────────────────────
 st.set_page_config(
@@ -144,9 +144,6 @@ def refresh_session_list():
 # ══════════════════════════════════════════════════════════════
 # 应用初始化
 # ══════════════════════════════════════════════════════════════
-
-# 启动时自动建表
-init_db()
 
 # 首次访问：恢复最近的会话，或无会话时创建默认会话
 if "session_id" not in st.session_state:
@@ -388,6 +385,8 @@ else:
     placeholder = "请先在左侧上传数据文件..."
 
 if prompt := st.chat_input(placeholder=placeholder):
+    TraceContext.init()  # 开启新链路
+
     # 0. 首次提问时用问题内容自动命名会话，时间标记为首次交互时间
     if len(st.session_state.messages) == 0:
         new_name = prompt[:40] + ("..." if len(prompt) > 40 else "")
@@ -423,42 +422,44 @@ if prompt := st.chat_input(placeholder=placeholder):
         had_error = False
 
         try:
-            for event in route_stream(
-                prompt=prompt,
-                history=history,
-                temperature=st.session_state.temperature,
-            ):
-                if event["type"] == "token":
-                    text_buffer += event["content"]
-                    text_placeholder.markdown(text_buffer)
+            with trace_span("user_request", prompt=prompt[:80]):
+                TraceContext.add_meta(model=DEEPSEEK_MODEL)
+                for event in route_stream(
+                    prompt=prompt,
+                    history=history,
+                    temperature=st.session_state.temperature,
+                ):
+                    if event["type"] == "token":
+                        text_buffer += event["content"]
+                        text_placeholder.markdown(text_buffer)
 
-                elif event["type"] == "tool_start":
-                    status_placeholder.info(f"正在调用工具: {event['tool']}...")
+                    elif event["type"] == "tool_start":
+                        status_placeholder.info(f"正在调用工具: {event['tool']}...")
 
-                elif event["type"] == "tool_end":
-                    status_placeholder.empty()
-                    # 图片即刻渲染
-                    for img_path in event.get("images", []):
-                        if os.path.exists(img_path) and os.path.getsize(img_path) >= 1024:
-                            st.image(img_path, use_container_width=True)
-                        else:
-                            st.caption(f"[图表不可用: {os.path.basename(img_path)}]")
-                    images.extend(event.get("images", []))
+                    elif event["type"] == "tool_end":
+                        status_placeholder.empty()
+                        # 图片即刻渲染
+                        for img_path in event.get("images", []):
+                            if os.path.exists(img_path) and os.path.getsize(img_path) >= 1024:
+                                st.image(img_path, use_container_width=True)
+                            else:
+                                st.caption(f"[图表不可用: {os.path.basename(img_path)}]")
+                        images.extend(event.get("images", []))
 
-                elif event["type"] == "error":
-                    had_error = True
-                    text_placeholder.error(event["content"])
-                    full_text = event["content"]
-                    break
+                    elif event["type"] == "error":
+                        had_error = True
+                        text_placeholder.error(event["content"])
+                        full_text = event["content"]
+                        break
 
-                elif event["type"] == "done":
-                    full_text = event.get("full_text", text_buffer)
-                    images = event.get("images", images)
+                    elif event["type"] == "done":
+                        full_text = event.get("full_text", text_buffer)
+                        images = event.get("images", images)
 
-            status_placeholder.empty()
-            # 确保最终文本一致
-            if full_text and text_buffer and not full_text.startswith(text_buffer):
-                text_placeholder.markdown(full_text)
+                status_placeholder.empty()
+                # 确保最终文本一致
+                if full_text and text_buffer and not full_text.startswith(text_buffer):
+                    text_placeholder.markdown(full_text)
 
         except Exception as e:
             had_error = True
@@ -487,3 +488,6 @@ if prompt := st.chat_input(placeholder=placeholder):
                 "images": images,
                 "_persisted": True,
             })
+
+        # 5. 保存全链路 trace 到 DB
+        TraceManager.save(st.session_state.session_id)

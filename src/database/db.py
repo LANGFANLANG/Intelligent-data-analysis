@@ -37,3 +37,22 @@ def init_db():
 
     # create_all 会检查表是否存在，只创建缺失的表
     Base.metadata.create_all(engine)
+
+
+def drop_all():
+    """删除所有表（危险操作，仅开发调试用）"""
+    from src.database.models import Base
+    Base.metadata.drop_all(engine)
+
+
+if __name__ == "__main__":
+    import sys
+
+    if "--drop" in sys.argv:
+        confirm = input("确认删除所有表? 输入 yes 继续: ")
+        if confirm.lower() == "yes":
+            drop_all()
+            print("所有表已删除")
+    else:
+        init_db()
+        print("数据库表初始化完成（已存在的表自动跳过）")

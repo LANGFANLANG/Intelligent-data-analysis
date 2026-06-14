@@ -1,15 +1,16 @@
 """
 数据库 ORM 模型定义
 ───────────────────
-使用 SQLAlchemy 2.0 声明式映射，定义 PostgreSQL 中的两张核心表：
+使用 SQLAlchemy 2.0 声明式映射，定义 PostgreSQL 中的三张核心表：
 
   sessions  ── 会话元数据（名称、关联数据文件、模型参数、时间戳）
   messages  ── 聊天消息（关联到会话，级联删除）
+  traces    ── 全链路追踪 span（关联到会话，级联删除）
 
-关系：Session 1 ── N Message（含外键 + 级联删除）
+关系：Session 1 ── N Message / Trace（含外键 + 级联删除）
 """
 from sqlalchemy import Column, String, Text, Float, DateTime, Integer, ForeignKey, CheckConstraint
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSON
 from sqlalchemy.orm import declarative_base, relationship
 import uuid
 from datetime import datetime, timezone
@@ -49,6 +50,10 @@ class Session(Base):
     messages = relationship(
         "Message", back_populates="session", cascade="all, delete-orphan", order_by="Message.id"
     )
+    # Session 拥有多条 Trace
+    traces = relationship(
+        "Trace", back_populates="session", cascade="all, delete-orphan",
+    )
 
 
 class Message(Base):
@@ -79,3 +84,41 @@ class Message(Base):
 
     # 反向关系：每条消息属于一个会话
     session = relationship("Session", back_populates="messages")
+
+
+class Trace(Base):
+    """
+    全链路追踪表 ── 记录每次请求的完整执行调用树
+
+    每个 span 对应一个执行单元（分类/LLM调用/工具执行等），
+    同一次请求的所有 span 共享同一个 trace_id，
+    通过 parent_id 构建树形结构。
+
+    字段说明：
+      id          - Span 唯一标识（UUID）
+      session_id  - 关联的会话（外键 → sessions.id，级联删除）
+      trace_id    - 全链路 ID（同一次请求的所有 span 共享）
+      parent_id   - 父 span ID（构建树形结构，根节点为 NULL）
+      name        - Span 名称（classify_intent / llm_call / tool_xxx 等）
+      start_time  - 开始时间（UTC）
+      end_time    - 结束时间（UTC，运行中为 NULL）
+      duration_ms - 耗时（毫秒）
+      status      - 状态：running / success / error
+      metadata    - 扩展信息（JSON）：{tokens, model, intent, error_msg, ...}
+      created_at  - 记录创建时间
+    """
+    __tablename__ = "traces"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id = Column(UUID(as_uuid=True), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    trace_id = Column(String(36), nullable=False, index=True)
+    parent_id = Column(String(36), ForeignKey("traces.id"), nullable=True)
+    name = Column(String(128), nullable=False)
+    start_time = Column(DateTime(timezone=True), nullable=False)
+    end_time = Column(DateTime(timezone=True), nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+    status = Column(String(20), nullable=False, default="running")
+    metadata_ = Column("metadata", JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    session = relationship("Session", back_populates="traces")
