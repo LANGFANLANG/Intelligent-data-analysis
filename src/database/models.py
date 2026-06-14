@@ -72,6 +72,8 @@ class Message(Base):
     role = Column(String(20), CheckConstraint("role IN ('user', 'assistant')"), nullable=False)
     # 消息文本内容
     content = Column(Text, nullable=False)
+    # 关联的图表文件路径（JSON数组字符串），如 '["path1.png","path2.png"]'
+    images = Column(Text, nullable=True)
     # 消息创建时间
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 

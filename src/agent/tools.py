@@ -8,6 +8,7 @@ LangChain Tool 注册表
 帮助 Agent 理解何时以及如何调用该工具。
 """
 from langchain.tools import tool
+from datetime import datetime, timezone
 
 # ── 数据清洗工具 ──
 from src.tools.data_cleaner import (
@@ -39,6 +40,9 @@ from src.tools.visualizer import (
 )
 
 # ── 工具注册 ──
+# 每个 @tool 包裹 try/except，确保工具异常不会导致 Agent 崩溃，
+# 而是以错误字符串的形式返回给 Agent，Agent 可以据此调整策略
+
 
 @tool
 def tool_check_missing() -> str:
@@ -47,7 +51,10 @@ def tool_check_missing() -> str:
     在开始任何分析之前，建议先调用此工具了解数据质量。
     无需参数。
     """
-    return check_missing()
+    try:
+        return check_missing()
+    except Exception as e:
+        return f"工具执行异常: {e}"
 
 
 @tool
@@ -59,7 +66,10 @@ def tool_fill_missing_mean(column: str) -> str:
     Args:
         column: 需要填充的数值列名
     """
-    return fill_missing_mean(column)
+    try:
+        return fill_missing_mean(column)
+    except Exception as e:
+        return f"工具执行异常: {e}"
 
 
 @tool
@@ -71,7 +81,10 @@ def tool_fill_missing_median(column: str) -> str:
     Args:
         column: 需要填充的数值列名
     """
-    return fill_missing_median(column)
+    try:
+        return fill_missing_median(column)
+    except Exception as e:
+        return f"工具执行异常: {e}"
 
 
 @tool
@@ -83,7 +96,10 @@ def tool_fill_missing_mode(column: str) -> str:
     Args:
         column: 需要填充的列名
     """
-    return fill_missing_mode(column)
+    try:
+        return fill_missing_mode(column)
+    except Exception as e:
+        return f"工具执行异常: {e}"
 
 
 @tool
@@ -95,7 +111,10 @@ def tool_drop_missing(column: str = "") -> str:
     Args:
         column: 可选，指定要检查的列名，留空检查所有列
     """
-    return drop_missing(column if column else None)
+    try:
+        return drop_missing(column if column else None)
+    except Exception as e:
+        return f"工具执行异常: {e}"
 
 
 @tool
@@ -104,7 +123,10 @@ def tool_drop_duplicates() -> str:
     删除数据框中完全重复的行。
     无需参数。
     """
-    return drop_duplicates()
+    try:
+        return drop_duplicates()
+    except Exception as e:
+        return f"工具执行异常: {e}"
 
 
 @tool
@@ -115,7 +137,10 @@ def tool_drop_column(columns: str) -> str:
     Args:
         columns: 要删除的列名，多个用逗号分隔，例如 "col1,col2"
     """
-    return drop_column(columns)
+    try:
+        return drop_column(columns)
+    except Exception as e:
+        return f"工具执行异常: {e}"
 
 
 @tool
@@ -127,7 +152,10 @@ def tool_describe_data(columns: str = "") -> str:
     Args:
         columns: 可选，指定列名（逗号分隔），留空分析所有数值列
     """
-    return describe_data(columns if columns else "")
+    try:
+        return describe_data(columns if columns else "")
+    except Exception as e:
+        return f"工具执行异常: {e}"
 
 
 @tool
@@ -139,7 +167,10 @@ def tool_correlate(columns: str = "") -> str:
     Args:
         columns: 可选，指定要分析的列名（逗号分隔），留空分析所有数值列
     """
-    return correlate(columns if columns else "")
+    try:
+        return correlate(columns if columns else "")
+    except Exception as e:
+        return f"工具执行异常: {e}"
 
 
 @tool
@@ -153,7 +184,10 @@ def tool_groupby_agg(group_col: str, value_col: str, agg_func: str = "mean") -> 
         value_col: 聚合目标列名
         agg_func:  聚合函数，可选 mean/sum/count/min/max/std/median，默认 mean
     """
-    return groupby_agg(group_col, value_col, agg_func)
+    try:
+        return groupby_agg(group_col, value_col, agg_func)
+    except Exception as e:
+        return f"工具执行异常: {e}"
 
 
 @tool
@@ -166,7 +200,10 @@ def tool_value_counts(column: str, top_n: int = 10) -> str:
         column: 目标列名
         top_n:  返回前 N 个最多的值，默认 10
     """
-    return value_counts(column, top_n)
+    try:
+        return value_counts(column, top_n)
+    except Exception as e:
+        return f"工具执行异常: {e}"
 
 
 @tool
@@ -180,7 +217,10 @@ def tool_line_chart(x_column: str, y_column: str) -> str:
         x_column: X 轴列名（时间/有序类别）
         y_column: Y 轴列名（数值）
     """
-    return line_chart(x_column, y_column)
+    try:
+        return line_chart(x_column, y_column)
+    except Exception as e:
+        return f"工具执行异常: {e}"
 
 
 @tool
@@ -193,7 +233,10 @@ def tool_bar_chart(x_column: str, y_column: str) -> str:
         x_column: X 轴列名（分类列）
         y_column: Y 轴列名（数值列）
     """
-    return bar_chart(x_column, y_column)
+    try:
+        return bar_chart(x_column, y_column)
+    except Exception as e:
+        return f"工具执行异常: {e}"
 
 
 @tool
@@ -207,7 +250,10 @@ def tool_scatter_plot(x_column: str, y_column: str) -> str:
         x_column: X 轴列名（数值列）
         y_column: Y 轴列名（数值列）
     """
-    return scatter_plot(x_column, y_column)
+    try:
+        return scatter_plot(x_column, y_column)
+    except Exception as e:
+        return f"工具执行异常: {e}"
 
 
 @tool
@@ -219,7 +265,10 @@ def tool_pie_chart(column: str) -> str:
     Args:
         column: 分类列名
     """
-    return pie_chart(column)
+    try:
+        return pie_chart(column)
+    except Exception as e:
+        return f"工具执行异常: {e}"
 
 
 @tool
@@ -232,7 +281,10 @@ def tool_heatmap(columns: str = "") -> str:
     Args:
         columns: 可选，指定列名（逗号分隔），留空分析所有数值列
     """
-    return heatmap(columns if columns else "")
+    try:
+        return heatmap(columns if columns else "")
+    except Exception as e:
+        return f"工具执行异常: {e}"
 
 
 @tool
@@ -246,7 +298,36 @@ def tool_histogram(column: str, bins: int = 20) -> str:
         column: 数值列名
         bins:   分箱数量，默认 20
     """
-    return histogram(column, bins)
+    try:
+        return histogram(column, bins)
+    except Exception as e:
+        return f"工具执行异常: {e}"
+
+
+@tool
+def tool_get_current_time() -> str:
+    """
+    获取当前日期和时间。
+    当用户提到"今天/当前/最近/本周/本月"等时间相关问题时，
+    必须先调用此工具获取准确日期，再结合数据进行筛选分析。
+    无需参数。
+
+    Returns:
+        当前北京时间 + UTC 时间字符串
+    """
+    try:
+        from datetime import timedelta
+        now_utc = datetime.now(timezone.utc)
+        beijing_tz = timezone(timedelta(hours=8))
+        now_beijing = now_utc.astimezone(beijing_tz)
+        weekday_map = ["一", "二", "三", "四", "五", "六", "日"]
+        weekday = weekday_map[now_beijing.weekday()]
+        return (
+            f"北京时间: {now_beijing.strftime('%Y-%m-%d')} 星期{weekday} {now_beijing.strftime('%H:%M:%S')} (UTC+8), "
+            f"UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+    except Exception as e:
+        return f"工具执行异常: {e}"
 
 
 # ── 全部工具列表 ──
@@ -271,4 +352,6 @@ ALL_TOOLS = [
     tool_pie_chart,
     tool_heatmap,
     tool_histogram,
+    # 工具
+    tool_get_current_time,
 ]

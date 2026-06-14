@@ -25,10 +25,12 @@ DataMate 智能数据分析助手的核心 UI 页面。
 import streamlit as st
 import pandas as pd
 import os
+from datetime import datetime, timezone
 
 from src.config import DEEPSEEK_MODEL
 from src.agent.context import ToolContext
-from src.agent.agent import run_agent
+from src.agent.agent import run_agent, run_agent_stream
+from src.agent.router import route_stream
 from src.tools.data_loader import load_file
 from src.database.db import init_db
 from src.database.session_manager import SessionManager
@@ -372,6 +374,12 @@ if st.session_state.df is None:
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        # 渲染消息附带的图表（支持历史会话恢复后显示）
+        for img_path in msg.get("images", []):
+            if os.path.exists(img_path) and os.path.getsize(img_path) >= 1024:
+                st.image(img_path, use_container_width=True)
+            else:
+                st.caption(f"[图表不可用: {os.path.basename(img_path)}]")
 
 # ── 聊天输入区 ──
 if st.session_state.df is not None:
@@ -380,6 +388,16 @@ else:
     placeholder = "请先在左侧上传数据文件..."
 
 if prompt := st.chat_input(placeholder=placeholder):
+    # 0. 首次提问时用问题内容自动命名会话，时间标记为首次交互时间
+    if len(st.session_state.messages) == 0:
+        new_name = prompt[:40] + ("..." if len(prompt) > 40 else "")
+        SessionManager.rename_session(st.session_state.session_id, new_name)
+        SessionManager.update_meta(
+            st.session_state.session_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        refresh_session_list()
+
     # 1. 用户消息持久化 + 界面追加
     SessionManager.add_message(st.session_state.session_id, "user", prompt)
     st.session_state.messages.append(
@@ -394,44 +412,78 @@ if prompt := st.chat_input(placeholder=placeholder):
         for m in st.session_state.messages[:-1]
     ]
 
-    # 3. 调用 ReAct Agent 执行分析
+    # 3. 流式调用 ReAct Agent 执行分析
     with st.chat_message("assistant"):
-        with st.spinner("Agent 分析中，正在调用工具..."):
-            try:
-                result = run_agent(
-                    prompt=prompt,
-                    history=history,
-                    temperature=st.session_state.temperature,
-                )
+        text_placeholder = st.empty()
+        status_placeholder = st.empty()
 
-                # 4. 渲染 Markdown 文本报告
-                st.markdown(result["text"])
+        text_buffer = ""
+        images = []
+        full_text = ""
+        had_error = False
 
-                # 5. 渲染可视化图表
-                for img_path in result["images"]:
-                    if os.path.exists(img_path):
-                        st.image(img_path, use_container_width=True)
+        try:
+            for event in route_stream(
+                prompt=prompt,
+                history=history,
+                temperature=st.session_state.temperature,
+            ):
+                if event["type"] == "token":
+                    text_buffer += event["content"]
+                    text_placeholder.markdown(text_buffer)
 
-                # 6. 构建完整的持久化内容（文本 + 图表引用）
-                full_content = result["text"]
-                if result["images"]:
-                    full_content += "\n\n---\n### 生成的图表\n"
-                    for img_path in result["images"]:
-                        full_content += f"\n![图表]({img_path})"
+                elif event["type"] == "tool_start":
+                    status_placeholder.info(f"正在调用工具: {event['tool']}...")
 
-                # 7. 持久化 AI 回复
-                SessionManager.add_message(
-                    st.session_state.session_id, "assistant", full_content
-                )
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": full_content, "_persisted": True}
-                )
-            except Exception as e:
-                error_msg = f"❌ Agent 执行出错: {str(e)}"
-                st.error(error_msg)
-                SessionManager.add_message(
-                    st.session_state.session_id, "assistant", error_msg
-                )
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": error_msg, "_persisted": True}
-                )
+                elif event["type"] == "tool_end":
+                    status_placeholder.empty()
+                    # 图片即刻渲染
+                    for img_path in event.get("images", []):
+                        if os.path.exists(img_path) and os.path.getsize(img_path) >= 1024:
+                            st.image(img_path, use_container_width=True)
+                        else:
+                            st.caption(f"[图表不可用: {os.path.basename(img_path)}]")
+                    images.extend(event.get("images", []))
+
+                elif event["type"] == "error":
+                    had_error = True
+                    text_placeholder.error(event["content"])
+                    full_text = event["content"]
+                    break
+
+                elif event["type"] == "done":
+                    full_text = event.get("full_text", text_buffer)
+                    images = event.get("images", images)
+
+            status_placeholder.empty()
+            # 确保最终文本一致
+            if full_text and text_buffer and not full_text.startswith(text_buffer):
+                text_placeholder.markdown(full_text)
+
+        except Exception as e:
+            had_error = True
+            error_str = str(e)
+            if "recursion" in error_str.lower() or "limit" in error_str.lower():
+                error_msg = "分析步骤过多，建议将问题拆分为多个小问题依次提问"
+            elif "timeout" in error_str.lower():
+                error_msg = "分析超时，请简化问题或检查数据质量"
+            elif "api" in error_str.lower() or "401" in error_str.lower() or "403" in error_str.lower():
+                error_msg = "模型连接失败，请检查 API Key 或网络连接"
+            elif "rate" in error_str.lower() or "429" in error_str.lower():
+                error_msg = "API 请求过于频繁，请稍后再试"
+            else:
+                error_msg = f"分析失败: {error_str}"
+            text_placeholder.error(error_msg)
+            full_text = error_msg
+
+        # 4. 持久化 AI 回复
+        if full_text:
+            SessionManager.add_message(
+                st.session_state.session_id, "assistant", full_text, images
+            )
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": full_text,
+                "images": images,
+                "_persisted": True,
+            })

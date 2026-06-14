@@ -16,8 +16,19 @@ API 清单：
   update_meta()     - 更新会话元数据（df_name / temperature）
 """
 from datetime import datetime, timezone
+import json
 from src.database.db import SessionLocal
 from src.database.models import Session, Message
+
+
+def _parse_images(raw: str | None) -> list[str]:
+    """解析数据库中存储的图表路径 JSON数组"""
+    if not raw:
+        return []
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
 
 
 class SessionManager:
@@ -69,7 +80,7 @@ class SessionManager:
                 "created_at": session.created_at.isoformat(),
                 "updated_at": session.updated_at.isoformat(),
                 "messages": [
-                    {"role": m.role, "content": m.content}
+                    {"role": m.role, "content": m.content, "images": _parse_images(m.images)}
                     for m in session.messages
                 ],
             }
@@ -97,7 +108,7 @@ class SessionManager:
             ]
 
     @staticmethod
-    def add_message(session_id: str, role: str, content: str):
+    def add_message(session_id: str, role: str, content: str, images: list[str] | None = None):
         """
         向指定会话追加一条消息，并同步刷新会话的 updated_at 时间
 
@@ -105,10 +116,12 @@ class SessionManager:
             session_id: 目标会话 UUID
             role:       消息角色 ('user' / 'assistant')
             content:    消息文本内容
+            images:     关联的图表文件路径列表（可选）
         """
         with SessionLocal() as db:
             # 创建消息记录
-            msg = Message(session_id=session_id, role=role, content=content)
+            images_json = json.dumps(images) if images else None
+            msg = Message(session_id=session_id, role=role, content=content, images=images_json)
             db.add(msg)
             # 同步更新会话的最后活跃时间
             db.query(Session).filter(Session.id == session_id).update(
@@ -158,7 +171,7 @@ class SessionManager:
             session_id:   目标会话 UUID
             **kwargs:     需更新的字段键值对 (df_name=..., temperature=...)
         """
-        allowed = {"df_name", "temperature"}
+        allowed = {"df_name", "temperature", "created_at"}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if updates:
             updates["updated_at"] = datetime.now(timezone.utc)
