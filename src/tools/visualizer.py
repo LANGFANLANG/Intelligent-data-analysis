@@ -98,6 +98,25 @@ MAX_PIE_CATEGORIES = VIZ_MAX_PIE_CATEGORIES
 MAX_BAR_CATEGORIES = VIZ_MAX_BAR_CATEGORIES
 
 
+def _coerce_numeric(df: pd.DataFrame, column: str) -> pd.Series:
+    """
+    强制转换列为数值类型，兼容 SQLAlchemy 返回的 Decimal / 字符串数值
+
+    图表工具在 .mean() / .plot() 等操作前调用，防止 object dtype 导致异常。
+
+    Args:
+        df:     数据框
+        column: 列名
+
+    Returns:
+        转换后的数值 Series；非数值列转换为 NaN 后仍返回
+    """
+    series = df[column]
+    if series.dtype in ("int64", "float64", "int32", "float32"):
+        return series
+    return pd.to_numeric(series, errors="coerce")
+
+
 def _save_fig(name: str) -> str:
     """
     保存当前图表到 outputs/ 目录，做空白图检测 + 去 Alpha 通道处理
@@ -118,7 +137,7 @@ def _save_fig(name: str) -> str:
 
     # 再保存到内存缓冲区，检测内容后再写入磁盘
     buf = BytesIO()
-    plt.savefig(buf, format="png", dpi=200, bbox_inches="tight",
+    plt.savefig(buf, format="png", dpi=VIZ_DPI, bbox_inches="tight",
                 facecolor="white", edgecolor="white", transparent=False,
                 pad_inches=0.3)
     plt.close()
@@ -194,8 +213,10 @@ def line_chart(x_column: str, y_column: str) -> str:
     if x_column not in df.columns or y_column not in df.columns:
         return f"错误: 列 '{x_column}' 或 '{y_column}' 不存在"
 
-    # 按 X 轴排序，避免连线错乱
-    plot_df = df[[x_column, y_column]].dropna().sort_values(by=x_column)
+    y_series = _coerce_numeric(df, y_column)
+    plot_df = df[[x_column]].copy()
+    plot_df[y_column] = y_series
+    plot_df = plot_df.dropna(subset=[y_column]).sort_values(by=x_column)
     if len(plot_df) == 0:
         return "错误: 过滤后数据为空，无法绘制折线图"
 
@@ -222,6 +243,10 @@ def bar_chart(x_column: str, y_column: str) -> str:
     """
     柱状图 — 适合分类对比
 
+    自动识别数据规模:
+      - 少量行(≤20): 直接绘制，不做 groupby（适合 SQL 查询结果）
+      - 大量行: 按 x_column 分组求 y_column 均值后绘制
+
     Args:
         x_column: X 轴列名（分类列）
         y_column: Y 轴列名（数值列）
@@ -235,13 +260,22 @@ def bar_chart(x_column: str, y_column: str) -> str:
     if x_column not in df.columns or y_column not in df.columns:
         return f"错误: 列 '{x_column}' 或 '{y_column}' 不存在"
 
-    # 聚合计算：按 x 列分组求 y 列均值，取 Top N
-    work_df, was_sampled = _maybe_sample(df)
-    agg_df = work_df.groupby(x_column)[y_column].mean().sort_values(ascending=False)
-    if len(agg_df) == 0:
-        return "错误: 分组聚合后数据为空，无法绘制柱状图"
+    # 确保数值列为正确的数值类型
+    y_series = _coerce_numeric(df, y_column)
+    work_df = df[[x_column]].copy()
+    work_df[y_column] = y_series
+    work_df = work_df.dropna(subset=[y_column])
+    if len(work_df) == 0:
+        return f"错误: 列 '{y_column}' 无有效数值数据，无法绘图"
 
-    # 分类太多时只取 Top N
+    work_df, was_sampled = _maybe_sample(work_df)
+
+    # 少量数据行 → 直接绘制（适合 SQL 查询结果）
+    if len(work_df) <= 20:
+        agg_df = work_df.set_index(x_column)[y_column].sort_values(ascending=False)
+    else:
+        agg_df = work_df.groupby(x_column)[y_column].mean().sort_values(ascending=False)
+
     if len(agg_df) > MAX_BAR_CATEGORIES:
         agg_df = agg_df.head(MAX_BAR_CATEGORIES)
 
@@ -282,8 +316,9 @@ def scatter_plot(x_column: str, y_column: str) -> str:
     if x_column not in df.columns or y_column not in df.columns:
         return f"错误: 列 '{x_column}' 或 '{y_column}' 不存在"
 
-    # 去除 NaN，避免 polyfit 崩溃
-    plot_df = df[[x_column, y_column]].dropna()
+    x_series = _coerce_numeric(df, x_column)
+    y_series = _coerce_numeric(df, y_column)
+    plot_df = pd.DataFrame({x_column: x_series, y_column: y_series}).dropna()
     if len(plot_df) == 0:
         return "错误: 数据列全为空值，无法绘图"
 
@@ -448,7 +483,7 @@ def histogram(column: str, bins: int = 20) -> str:
     if column not in df.columns:
         return f"错误: 列 '{column}' 不存在"
 
-    data = df[column].dropna()
+    data = _coerce_numeric(df, column).dropna()
     if len(data) == 0:
         return "错误: 指定列全为空值"
 

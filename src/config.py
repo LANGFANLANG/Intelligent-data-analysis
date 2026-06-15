@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 # 从项目根目录加载 .env 文件（显式指定路径，避免中文路径兼容问题）
 env_path = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(dotenv_path=env_path)
+load_dotenv(dotenv_path=env_path, override=True)
 
 # ── DeepSeek 模型配置 ──
 # 优先读取 .env 中的 DEEPSEEK_API_KEY，fallback 到系统环境变量 DEEPSEEK
@@ -38,6 +38,28 @@ SAMPLE_MAX_ROWS = int(os.getenv("SAMPLE_MAX_ROWS", "50000"))
 
 # ── Streamlit 端口 ──
 STREAMLIT_PORT = int(os.getenv("STREAMLIT_PORT", "8501"))
+
+# ── MySQL 数据库直连配置 ──
+DB_TYPE = os.getenv("DB_TYPE", "")
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = int(os.getenv("DB_PORT", "3306"))
+DB_NAME = os.getenv("DB_NAME", "")
+DB_USER = os.getenv("DB_USER", "")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+DB_CHARSET = os.getenv("DB_CHARSET", "utf8mb4")
+
+# ── SQL 执行限制 ──
+SQL_MAX_ROWS = int(os.getenv("SQL_MAX_ROWS", "1000"))
+SQL_TIMEOUT_SEC = int(os.getenv("SQL_TIMEOUT_SEC", "30"))
+
+# ── Schema 缓存 ──
+SCHEMA_CACHE_TTL_MINUTES = int(os.getenv("SCHEMA_CACHE_TTL_MINUTES", "30"))
+
+# ── Langfuse 观测平台配置 ──
+LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+LANGFUSE_ENABLED = bool(LANGFUSE_SECRET_KEY and LANGFUSE_PUBLIC_KEY and "xxx" not in LANGFUSE_SECRET_KEY)
 
 # ── 启动校验 ──
 if not DEEPSEEK_API_KEY:

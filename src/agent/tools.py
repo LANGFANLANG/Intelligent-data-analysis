@@ -39,6 +39,12 @@ from src.tools.visualizer import (
     histogram,
 )
 
+# ── 数据库工具 ──
+from src.agent.sql_sanitizer import validate_readonly_sql
+from src.connectors import get_connector
+from src.schema import get_cached_schema, serialize_table_schema, refresh_schema
+from src.config import SQL_MAX_ROWS, SQL_TIMEOUT_SEC
+
 # ── 工具注册 ──
 # 每个 @tool 包裹 try/except，确保工具异常不会导致 Agent 崩溃，
 # 而是以错误字符串的形式返回给 Agent，Agent 可以据此调整策略
@@ -330,6 +336,136 @@ def tool_get_current_time() -> str:
         return f"工具执行异常: {e}"
 
 
+@tool
+def tool_list_tables() -> str:
+    """
+    列出数据库中所有可用的表名及大致行数。
+    用于了解数据库中有哪些数据可以分析。
+    无需参数。
+
+    Returns:
+        表名列表及行数信息
+    """
+    try:
+        connector = get_connector()
+        if not connector or not connector.is_connected:
+            return "错误: 数据库未连接，请检查数据库配置"
+
+        tables = connector.discover_tables()
+        if not tables:
+            return "数据库中未发现任何表"
+
+        lines = ["数据库中的表:"]
+        for t in tables:
+            rows = connector.get_table_row_count(t)
+            row_str = f"{rows:,}" if rows is not None else "未知"
+            lines.append(f"  - {t} (约 {row_str} 行)")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"工具执行异常: {e}"
+
+
+@tool
+def tool_describe_table(table_name: str) -> str:
+    """
+    查看指定表的详细结构，包括列名、数据类型、是否可空、主键信息。
+    在生成 SQL 查询前必须先了解表结构。
+
+    Args:
+        table_name: 表名
+    """
+    try:
+        connector = get_connector()
+        if not connector or not connector.is_connected:
+            return "错误: 数据库未连接"
+
+        tables = connector.discover_tables()
+        if table_name not in tables:
+            similar = [t for t in tables if table_name.lower() in t.lower()]
+            hint = f" 相似的表: {', '.join(similar)}" if similar else ""
+            return f"错误: 表 '{table_name}' 不存在。可用的表: {', '.join(tables)}。{hint}"
+
+        cols = connector.describe_table(table_name)
+        row_count = connector.get_table_row_count(table_name)
+        return serialize_table_schema(table_name, cols, row_count)
+    except Exception as e:
+        return f"工具执行异常: {e}"
+
+
+@tool
+def tool_sql_query(sql: str) -> str:
+    """
+    执行只读 SQL 查询，结果将自动加载到分析上下文中。
+    执行后可以直接使用 describe_data / correlate / bar_chart 等工具
+    对查询结果进行进一步分析和可视化。
+    仅支持 SELECT 查询，自动限制返回行数。
+
+    Args:
+        sql: 要执行的 SELECT 查询语句
+    """
+    try:
+        from src.agent.context import ToolContext
+        import pandas as pd
+
+        is_valid, err_msg = validate_readonly_sql(sql)
+        if not is_valid:
+            return f"SQL 安全校验失败: {err_msg}"
+
+        connector = get_connector()
+        if not connector or not connector.is_connected:
+            return "错误: 数据库未连接"
+
+        df = connector.execute_query(sql, max_rows=SQL_MAX_ROWS, timeout=SQL_TIMEOUT_SEC)
+
+        # 自动转换数值列类型：SQLAlchemy 返回的 Decimal 会被 pandas 推断为 object，
+        # 导致后续图表工具的 .mean() 等聚合操作失败
+        for col in df.columns:
+            if df[col].dtype == "object":
+                try:
+                    df[col] = pd.to_numeric(df[col])
+                except (ValueError, TypeError):
+                    pass
+
+        label = f"sql_query_{len(df)}rows"
+        ToolContext.set_query_result(df, label)
+
+        # 构建详细的列信息（类型 + 前5行预览），帮助 LLM 选择正确的列
+        col_details = []
+        for c in df.columns:
+            dtype_label = str(df[c].dtype)
+            sample_vals = df[c].dropna().head(3).tolist()
+            sample_str = ", ".join(str(v) for v in sample_vals)
+            col_details.append(f"  {c} ({dtype_label}): {sample_str}")
+        col_info = "\n".join(col_details)
+
+        return (
+            f"查询成功。返回 {len(df):,} 行, {len(df.columns)} 列。\n"
+            f"列名与数据预览:\n{col_info}\n"
+            f"数据已加载到分析上下文，可以继续使用 describe_data / correlate / bar_chart "
+            f"/ pie_chart / groupby_agg 等工具进行分析。"
+        )
+    except Exception as e:
+        return f"SQL 执行失败: {e}"
+
+
+@tool
+def tool_refresh_schema() -> str:
+    """
+    刷新数据库 schema 缓存，获取最新的表结构信息。
+    当数据库结构发生变化时使用。
+    无需参数。
+    """
+    try:
+        schema = refresh_schema()
+        if not schema:
+            return "数据库 schema 为空，请检查数据库连接"
+        table_count = len(schema)
+        col_count = sum(len(info.get("columns", [])) for info in schema.values())
+        return f"Schema 已刷新: {table_count} 张表, 共 {col_count} 列"
+    except Exception as e:
+        return f"刷新失败: {e}"
+
+
 # ── 全部工具列表 ──
 ALL_TOOLS = [
     # 数据清洗
@@ -354,4 +490,27 @@ ALL_TOOLS = [
     tool_histogram,
     # 工具
     tool_get_current_time,
+    # 数据库查询
+    tool_list_tables,
+    tool_describe_table,
+    tool_sql_query,
+    tool_refresh_schema,
+]
+
+DB_TOOLS = [
+    tool_list_tables,
+    tool_describe_table,
+    tool_sql_query,
+    tool_refresh_schema,
+    tool_get_current_time,
+    tool_describe_data,
+    tool_correlate,
+    tool_groupby_agg,
+    tool_value_counts,
+    tool_line_chart,
+    tool_bar_chart,
+    tool_scatter_plot,
+    tool_pie_chart,
+    tool_heatmap,
+    tool_histogram,
 ]

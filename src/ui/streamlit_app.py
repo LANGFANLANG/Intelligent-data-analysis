@@ -33,8 +33,13 @@ from src.agent.agent import run_agent, run_agent_stream
 from src.agent.router import route_stream
 from src.tools.data_loader import load_file
 from src.database.session_manager import SessionManager
-from src.tracing import TraceContext, trace_span, TraceManager
+from src.observability import ObservationContext, get_langfuse, score_trace
 from src.agent.sanitizer import sanitize
+from src.connectors import create_connector, get_connector, close_connector
+from src.schema import get_cached_schema, refresh_schema
+from src.logger import get_logger
+
+_log = get_logger("ui")
 
 # ── 页面配置 ──────────────────────────────────────────────────
 st.set_page_config(
@@ -150,15 +155,42 @@ def refresh_session_list():
 if "session_id" not in st.session_state:
     sessions = SessionManager.list_sessions()
     if sessions:
-        # 有历史会话 → 自动加载最近更新的
         load_session(sessions[0]["id"])
     else:
-        # 首次使用 → 创建默认会话
         launch_new_session()
+
+# 数据库连接状态
+if "db_connected" not in st.session_state:
+    st.session_state.db_connected = False
+if "db_schema" not in st.session_state:
+    st.session_state.db_schema = {}
+if "db_tables" not in st.session_state:
+    st.session_state.db_tables = []
+if "db_error" not in st.session_state:
+    st.session_state.db_error = ""
+
+# 自动连接数据库（仅首次访问时执行）
+if not st.session_state.db_connected:
+    connector = create_connector()
+    if connector and connector.is_connected:
+        st.session_state.db_connected = True
+        st.session_state.db_error = ""
+        schema = get_cached_schema()
+        st.session_state.db_schema = schema
+        st.session_state.db_tables = list(schema.keys())
+    else:
+        st.session_state.db_connected = False
 
 # 加载会话列表供侧边栏展示
 if "sessions" not in st.session_state:
     refresh_session_list()
+
+# 动态计算活跃数据源: 文件优先，数据库次之
+has_file_data = st.session_state.df is not None
+if has_file_data:
+    ToolContext.set_data_source("file")
+else:
+    ToolContext.set_data_source("database")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -232,12 +264,12 @@ with st.sidebar:
 
     st.divider()
 
-    # ── 数据加载区 ──
-    st.subheader("📁 数据加载")
+    # ── 文件上传（始终可见）──
+    st.subheader("📁 上传数据文件")
     uploaded_file = st.file_uploader(
         "上传数据文件",
         type=["csv", "xls", "xlsx", "json"],
-        help="支持 CSV / Excel / JSON 格式，最大 200MB",
+        help="支持 CSV / Excel / JSON 格式",
         label_visibility="collapsed",
     )
 
@@ -248,21 +280,17 @@ with st.sidebar:
                 if df is not None:
                     st.session_state.df = df
                     st.session_state.df_name = uploaded_file.name
-                    # 同步工具上下文，让 Agent 工具可以访问数据
                     ToolContext.set(df, uploaded_file.name)
-                    # 同步数据文件名到数据库
+                    ToolContext.set_data_source("file")
                     SessionManager.update_meta(st.session_state.session_id, df_name=uploaded_file.name)
-                    # 加载新数据时清空当前对话历史
                     st.session_state.messages = []
                     st.rerun()
 
-    # ── 数据概览区（仅在加载数据后显示）──
     if st.session_state.df is not None:
         st.divider()
         st.subheader("📋 数据概览")
         df = st.session_state.df
 
-        # 文件名 + 规模卡片
         cols = st.columns(2)
         cols[0].markdown(
             f'<div class="stat-card"><span class="stat-label">文件名</span><br>'
@@ -275,12 +303,10 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
 
-        # 缺失值警告
         missing_total = df.isnull().sum().sum()
         if missing_total > 0:
             st.warning(f"⚠️ {missing_total} 个缺失值")
 
-        # 列名与类型表
         with st.expander("🔍 查看列名与类型"):
             dtype_df = pd.DataFrame({
                 "列名": df.columns,
@@ -289,11 +315,9 @@ with st.sidebar:
             })
             st.dataframe(dtype_df, use_container_width=True, hide_index=True)
 
-        # 前100行预览
         with st.expander("🧾 前 100 行预览"):
             st.dataframe(df.head(100), use_container_width=True)
 
-        # 移除数据按钮
         st.divider()
         if st.button("🗑️ 移除数据", use_container_width=True):
             st.session_state.df = None
@@ -303,9 +327,95 @@ with st.sidebar:
             SessionManager.update_meta(st.session_state.session_id, df_name=None)
             st.rerun()
 
-    else:
+    # ── 数据库连接（自动连接，始终可见）──
+    if st.session_state.db_connected:
+        from src.config import DB_HOST, DB_PORT, DB_NAME
+        from src.config import DB_USER
+
         st.divider()
-        st.info("💡 请先上传数据文件（CSV / Excel / JSON）")
+        st.subheader("🗄️ 数据库")
+        st.success(f"已连接: {DB_NAME} ({DB_HOST}:{DB_PORT})")
+
+        table_count = len(st.session_state.db_tables)
+        cols = st.columns(2)
+        cols[0].markdown(
+            f'<div class="stat-card"><span class="stat-label">数据库</span><br>'
+            f'<span class="stat-value">{DB_NAME}</span></div>',
+            unsafe_allow_html=True,
+        )
+        cols[1].markdown(
+            f'<div class="stat-card"><span class="stat-label">表数量</span><br>'
+            f'<span class="stat-value">{table_count} 张表</span></div>',
+            unsafe_allow_html=True,
+        )
+
+        with st.expander("📊 数据表浏览", expanded=False):
+            search_term = st.text_input(
+                "搜索表名",
+                placeholder="输入关键词筛选...",
+                label_visibility="collapsed",
+                key="table_search",
+            )
+
+            tables = st.session_state.db_tables
+            if search_term:
+                tables = [t for t in tables if search_term.lower() in t.lower()]
+
+            if tables:
+                schema = st.session_state.db_schema
+                for table_name in tables[:20]:
+                    info = schema.get(table_name, {})
+                    cols_list = info.get("columns", [])
+                    row_count = info.get("row_count")
+
+                    with st.expander(f"📄 {table_name}" + (f" (~{row_count:,} 行)" if row_count else "")):
+                        if cols_list:
+                            preview_data = []
+                            for c in cols_list:
+                                pk = "🔑" if c.get("is_primary_key") else ""
+                                preview_data.append({
+                                    "列名": c["name"],
+                                    "类型": c["type"],
+                                    "可空": "YES" if c.get("nullable") else "NO",
+                                    "键": pk,
+                                })
+                            st.dataframe(
+                                pd.DataFrame(preview_data),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+
+                        if st.button("📋 预览数据", key=f"preview_{table_name}"):
+                            try:
+                                connector = get_connector()
+                                if connector:
+                                    df = connector.execute_query(
+                                        f"SELECT * FROM `{table_name}` LIMIT 20"
+                                    )
+                                    st.dataframe(df, use_container_width=True, hide_index=True)
+                            except Exception as e:
+                                st.error(f"预览失败: {e}")
+
+                if len(st.session_state.db_tables) > 20:
+                    st.caption(f"还有 {len(st.session_state.db_tables) - 20} 张表未显示，使用搜索筛选")
+            else:
+                st.info("未找到匹配的表")
+
+            if st.button("🔄 刷新", use_container_width=True, key="refresh_schema_btn"):
+                with st.spinner("正在刷新..."):
+                    schema = refresh_schema()
+                    st.session_state.db_schema = schema
+                    st.session_state.db_tables = list(schema.keys())
+                st.rerun()
+
+    # ── 活跃数据源指示 ──
+    st.divider()
+    if has_file_data:
+        st.caption("📊 当前活跃数据源: 📁 上传文件")
+    elif st.session_state.db_connected:
+        st.caption("📊 当前活跃数据源: 🗄️ 数据库")
+    else:
+        st.caption("📊 当前活跃数据源: ⏳ 无")
 
     # ── 设置区 ──
     st.divider()
@@ -345,9 +455,14 @@ col_title, col_status = st.columns([3, 1])
 with col_title:
     st.title("📊 DataMate — 智能数据分析助手")
 with col_status:
-    if st.session_state.df is not None:
+    if has_file_data:
         st.markdown(
             '<div class="data-status data-loaded">✅ 数据已加载</div>',
+            unsafe_allow_html=True,
+        )
+    elif st.session_state.db_connected:
+        st.markdown(
+            '<div class="data-status data-loaded">✅ 数据库已连接</div>',
             unsafe_allow_html=True,
         )
     else:
@@ -356,14 +471,14 @@ with col_status:
             unsafe_allow_html=True,
         )
 
-# 显示当前会话 ID（截取前8位）
 current_sid = st.session_state.session_id
 st.caption(f"会话: `{current_sid[:8]}...` | 用自然语言分析你的数据")
 
-# ── 引导提示（无数据时）──
-if st.session_state.df is None:
+has_active_data = has_file_data or st.session_state.db_connected
+
+if not has_active_data:
     st.info(
-        "👈 **从左侧边栏上传一个数据文件开始分析**\n\n"
+        "👈 **从左侧边栏上传数据文件开始分析**\n\n"
         "支持 CSV、Excel (xlsx/xls)、JSON 格式。"
         "上传后点击「加载数据」按钮即可开始对话。"
     )
@@ -380,10 +495,10 @@ for msg in st.session_state.messages:
                 st.caption(f"[图表不可用: {os.path.basename(img_path)}]")
 
 # ── 聊天输入区 ──
-if st.session_state.df is not None:
+if has_active_data:
     placeholder = "例如：分析各列的相关性 / 画一下月度趋势图 / 查找缺失值最多的列..."
 else:
-    placeholder = "请先在左侧上传数据文件..."
+    placeholder = "请先在左侧上传数据文件或连接数据库..."
 
 if prompt := st.chat_input(placeholder=placeholder):
     # Prompt 注入防护
@@ -393,7 +508,11 @@ if prompt := st.chat_input(placeholder=placeholder):
         st.error(str(e))
         st.stop()
 
-    TraceContext.init()  # 开启新链路
+    # 初始化 Langfuse 观测上下文
+    ObservationContext.init(
+        session_id=st.session_state.session_id,
+        user_id="default",
+    )
 
     # 0. 首次提问时用问题内容自动命名会话，时间标记为首次交互时间
     if len(st.session_state.messages) == 0:
@@ -428,46 +547,51 @@ if prompt := st.chat_input(placeholder=placeholder):
         images = []
         full_text = ""
         had_error = False
+        is_db = not has_file_data and st.session_state.db_connected
+        db_status_shown = False
 
         try:
-            with trace_span("user_request", prompt=prompt[:80]):
-                TraceContext.add_meta(model=DEEPSEEK_MODEL)
-                for event in route_stream(
-                    prompt=prompt,
-                    history=history,
-                    temperature=st.session_state.temperature,
-                ):
-                    if event["type"] == "token":
-                        text_buffer += event["content"]
-                        text_placeholder.markdown(text_buffer)
+            for event in route_stream(
+                prompt=prompt,
+                history=history,
+                temperature=st.session_state.temperature,
+            ):
+                if event["type"] == "token":
+                    text_buffer += event["content"]
+                    text_placeholder.markdown(text_buffer)
 
-                    elif event["type"] == "tool_start":
+                elif event["type"] == "tool_start":
+                    if is_db:
+                        if not db_status_shown:
+                            status_placeholder.info("正在分析数据库...")
+                            db_status_shown = True
+                    else:
                         status_placeholder.info(f"正在调用工具: {event['tool']}...")
 
-                    elif event["type"] == "tool_end":
+                elif event["type"] == "tool_end":
+                    if not is_db:
                         status_placeholder.empty()
-                        # 图片即刻渲染
-                        for img_path in event.get("images", []):
-                            if os.path.exists(img_path) and os.path.getsize(img_path) >= 1024:
-                                st.image(img_path, use_container_width=True)
-                            else:
-                                st.caption(f"[图表不可用: {os.path.basename(img_path)}]")
-                        images.extend(event.get("images", []))
+                    for img_path in event.get("images", []):
+                        if os.path.exists(img_path) and os.path.getsize(img_path) >= 1024:
+                            st.image(img_path, use_container_width=True)
+                        else:
+                            st.caption(f"[图表不可用: {os.path.basename(img_path)}]")
+                    images.extend(event.get("images", []))
 
-                    elif event["type"] == "error":
-                        had_error = True
-                        text_placeholder.error(event["content"])
-                        full_text = event["content"]
-                        break
+                elif event["type"] == "error":
+                    had_error = True
+                    text_placeholder.error(event["content"])
+                    full_text = event["content"]
+                    break
 
-                    elif event["type"] == "done":
-                        full_text = event.get("full_text", text_buffer)
-                        images = event.get("images", images)
+                elif event["type"] == "done":
+                    full_text = event.get("full_text", text_buffer)
+                    images = event.get("images", images)
 
-                status_placeholder.empty()
-                # 确保最终文本一致
-                if full_text and text_buffer and not full_text.startswith(text_buffer):
-                    text_placeholder.markdown(full_text)
+            status_placeholder.empty()
+            # 确保最终文本一致
+            if full_text and text_buffer and not full_text.startswith(text_buffer):
+                text_placeholder.markdown(full_text)
 
         except Exception as e:
             had_error = True
@@ -497,5 +621,32 @@ if prompt := st.chat_input(placeholder=placeholder):
                 "_persisted": True,
             })
 
-        # 5. 保存全链路 trace 到 DB
-        TraceManager.save(st.session_state.session_id)
+        # 5. Langfuse 观测：flush 上报 + 显示追踪链接 + 用户反馈
+        langfuse_client = get_langfuse()
+        if langfuse_client is not None:
+            try:
+                langfuse_client.flush()
+            except Exception:
+                pass
+            trace_id = ObservationContext.get_trace_id()
+            trace_url = f"http://localhost:3000/trace/{trace_id}" if trace_id else None
+
+            col_link, col_fb = st.columns([4, 1])
+            with col_link:
+                if trace_url:
+                    st.caption(f"[🔍 在 Langfuse 中查看完整调用链]({trace_url})")
+                elif trace_id:
+                    st.caption(f"Trace: `{trace_id[:12]}...`")
+            with col_fb:
+                fb_key = f"fb_{len(st.session_state.messages)}"
+                if st.button("👍", key=f"up_{fb_key}", help="回答有帮助"):
+                    if trace_id:
+                        score_trace(trace_id, name="user_feedback", value=1.0)
+                    st.toast("感谢反馈！", icon="✅")
+                if st.button("👎", key=f"down_{fb_key}", help="回答需改进"):
+                    if trace_id:
+                        score_trace(trace_id, name="user_feedback", value=0.0)
+                    st.toast("感谢反馈，我们会持续改进！", icon="📝")
+
+        # 刷新会话列表（名称可能已更新）
+        refresh_session_list()

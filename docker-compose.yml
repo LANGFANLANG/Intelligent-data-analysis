@@ -26,12 +26,41 @@ services:
       - .env
     environment:
       - DATABASE_URL=postgresql://data_agent:data_agent_pass@postgres:5432/data_agent
+      - LANGFUSE_HOST=http://langfuse-server:3000
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
       - ./outputs:/app/outputs
       - ./logs:/app/logs
+    restart: unless-stopped
+
+  # ── Langfuse LLM 观测平台 ──
+  langfuse-server:
+    image: langfuse/langfuse:2
+    container_name: langfuse_server
+    ports:
+      - "${LANGFUSE_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgresql://data_agent:data_agent_pass@postgres:5432/data_agent
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
+      SALT: ${LANGFUSE_SALT}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+      NEXTAUTH_URL: http://localhost:${LANGFUSE_PORT:-3000}
+      TELEMETRY_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:2
+    container_name: langfuse_worker
+    environment:
+      DATABASE_URL: postgresql://data_agent:data_agent_pass@postgres:5432/data_agent
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

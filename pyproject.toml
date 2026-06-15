@@ -7,15 +7,18 @@ dependencies = [
     "langchain",
     "langchain-community",
     "langchain-openai",
+    "langfuse>=2,<3",
     "matplotlib",
     "numpy",
     "openpyxl",
     "pandas",
     "plotly",
     "psycopg2-binary>=2.9.12",
+    "pymysql>=1.1.0",
     "python-dotenv",
     "seaborn",
     "sqlalchemy>=2.0.50",
+    "sqlglot>=25.0.0",
     "streamlit",
 ]
 
